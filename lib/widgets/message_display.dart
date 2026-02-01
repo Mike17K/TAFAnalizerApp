@@ -10,9 +10,41 @@ class MessageDisplay extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<BluetoothBloc, BluetoothState>(
       builder: (context, state) {
+        // Handle different states
+        if (state is BluetoothDisconnected) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.bluetooth_disabled,
+                  size: 64,
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Disconnected',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Connect to a device to receive messages',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+        
         List<String> messages = [];
-        if (state is BluetoothMessagesReceived) {
+        if (state is BluetoothConnected) {
           messages = state.messages;
+          // Debug: print state info
+          print('MessageDisplay: Connected state with ${messages.length} messages');
         }
         
         if (messages.isEmpty) {

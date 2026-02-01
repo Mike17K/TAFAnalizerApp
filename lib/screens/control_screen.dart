@@ -5,8 +5,16 @@ import '../blocs/bluetooth/bluetooth_event.dart';
 import '../blocs/bluetooth/bluetooth_state.dart';
 import '../widgets/message_display.dart';
 
-class ControlScreen extends StatelessWidget {
+class ControlScreen extends StatefulWidget {
   const ControlScreen({super.key});
+
+  @override
+  State<ControlScreen> createState() => _ControlScreenState();
+}
+
+class _ControlScreenState extends State<ControlScreen> {
+  // Button states: 0 = show START, 1 = show STOP, 2 = show DATA
+  int _buttonState = 0;
 
   Future<bool> _onWillPop(BuildContext context) async {
     return await showDialog<bool>(
@@ -23,6 +31,10 @@ class ControlScreen extends StatelessWidget {
             onPressed: () {
               Navigator.of(ctx).pop(true);
               context.read<BluetoothBloc>().add(DisconnectEvent());
+              // Reset button state when disconnecting
+              setState(() {
+                _buttonState = 0;
+              });
             },
             child: const Text('Disconnect'),
           ),
@@ -47,10 +59,50 @@ class ControlScreen extends StatelessWidget {
               Navigator.of(ctx).pop();
               context.read<BluetoothBloc>().add(DisconnectEvent());
               Navigator.of(context).pop();
+              // Reset button state when disconnecting
+              setState(() {
+                _buttonState = 0;
+              });
             },
             child: const Text('Disconnect'),
           ),
         ],
+      ),
+    );
+  }
+
+  void _onStartPressed(BuildContext context) {
+    context.read<BluetoothBloc>().add(SendCommandEvent('START'));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('START command sent'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+    setState(() {
+      _buttonState = 1; // Show STOP button
+    });
+  }
+
+  void _onStopPressed(BuildContext context) {
+    context.read<BluetoothBloc>().add(SendCommandEvent('STOP'));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('STOP command sent'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+    setState(() {
+      _buttonState = 2; // Show DATA button
+    });
+  }
+
+  void _onDataPressed(BuildContext context) {
+    context.read<BluetoothBloc>().add(SendCommandEvent('DATA'));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('DATA command sent'),
+        duration: Duration(seconds: 1),
       ),
     );
   }
@@ -188,51 +240,77 @@ class ControlScreen extends StatelessWidget {
                         ),
                     ),
                     const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.tonalIcon(
-                            onPressed: () {
-                              context.read<BluetoothBloc>().add(SendCommandEvent('START'));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('START command sent'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            },
-                            icon: const Icon(Icons.play_arrow),
-                            label: const Text('Start'),
-                            style: FilledButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                              foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
-                            ),
+                    // Dynamic button based on state
+                    if (_buttonState == 0) ...[
+                      // Show START button
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.tonalIcon(
+                          onPressed: () => _onStartPressed(context),
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('Start'),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                            foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: () {
-                              context.read<BluetoothBloc>().add(SendCommandEvent('STOP'));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('STOP command sent'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            },
-                            icon: const Icon(Icons.stop),
-                            label: const Text('Stop'),
-                            style: FilledButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              backgroundColor: Theme.of(context).colorScheme.errorContainer,
-                              foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
-                            ),
+                      ),
+                    ] else if (_buttonState == 1) ...[
+                      // Show STOP button
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: () => _onStopPressed(context),
+                          icon: const Icon(Icons.stop),
+                          label: const Text('Stop'),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            backgroundColor: Theme.of(context).colorScheme.errorContainer,
+                            foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                    ] else if (_buttonState == 2) ...[
+                      // Show DATA button
+                      Column(
+                        children: [
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: () => _onDataPressed(context),
+                              icon: const Icon(Icons.data_usage),
+                              label: const Text('Data'),
+                              style: FilledButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                                foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          // Optional restart button
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _buttonState = 0; // Reset to START
+                                });
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Ready to start again'),
+                                    duration: Duration(seconds: 1),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Restart Sequence'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),

@@ -12,6 +12,7 @@ class BluetoothBloc extends HydratedBloc<BluetoothEvent, BluetoothState> {
   StreamSubscription? _dataSubscription;
   StreamSubscription? _stateSubscription;
   final List<String> _messages = [];
+  bt.BluetoothDevice? _connectedDevice;
 
   BluetoothBloc() : super(BluetoothInitial()) {
     on<ScanDevicesEvent>(_onScanDevices);
@@ -103,7 +104,11 @@ class BluetoothBloc extends HydratedBloc<BluetoothEvent, BluetoothState> {
         throw Exception("Failed to establish connection. Please try again.");
       }
       
-      emit(BluetoothConnected(event.device));
+      // Clear previous messages
+      _messages.clear();
+      _connectedDevice = event.device;
+      
+      emit(BluetoothConnected(event.device, messages: []));
       add(ListenForMessagesEvent());
     } catch (e) {
       String errorMessage = "Connection failed: ";
@@ -141,29 +146,66 @@ class BluetoothBloc extends HydratedBloc<BluetoothEvent, BluetoothState> {
     await _dataSubscription?.cancel();
     await _connection?.close();
     _connection = null;
+    _connectedDevice = null;
     _messages.clear();
     emit(BluetoothDisconnected());
   }
 
   void _onListenForMessages(ListenForMessagesEvent event, Emitter<BluetoothState> emit) async {
-    if (_connection == null || !_connection!.isConnected) {
+    if (_connection == null || !_connection!.isConnected || _connectedDevice == null) {
       return;
     }
 
     _dataSubscription = _connection!.input!.listen(
       (Uint8List data) {
         try {
+          // Try to decode as UTF-8
           String message = utf8.decode(data);
-          _messages.add(message);
           
-          // Keep only last 1000 messages
-          if (_messages.length > 1000) {
-            _messages.removeAt(0);
+          // Clean up the message (remove null characters, trim whitespace)
+          message = message.replaceAll('\x00', '').trim();
+          
+          // Split by newlines in case multiple messages come at once
+          List<String> messageLines = message.split('\n').where((line) => line.trim().isNotEmpty).toList();
+          
+          if (messageLines.isNotEmpty) {
+            _messages.addAll(messageLines);
+            
+            // Keep only last 1000 messages
+            if (_messages.length > 1000) {
+              _messages.removeRange(0, _messages.length - 1000);
+            }
+            
+            // Emit BluetoothConnected with updated messages
+            emit(BluetoothConnected(_connectedDevice!, messages: List.from(_messages)));
+            
+            // Debug: print received messages
+            print('Received ${messageLines.length} message(s): ${messageLines.join(", ")}');
           }
-          
-          emit(BluetoothMessagesReceived(List.from(_messages)));
         } catch (e) {
-          // Ignore decode errors
+          // Try alternative decoding if UTF-8 fails
+          try {
+            // Try Latin-1 decoding as fallback
+            String message = latin1.decode(data);
+            message = message.replaceAll('\x00', '').trim();
+            
+            List<String> messageLines = message.split('\n').where((line) => line.trim().isNotEmpty).toList();
+            
+            if (messageLines.isNotEmpty) {
+              _messages.addAll(messageLines);
+              
+              if (_messages.length > 1000) {
+                _messages.removeRange(0, _messages.length - 1000);
+              }
+              
+              emit(BluetoothConnected(_connectedDevice!, messages: List.from(_messages)));
+              
+              print('Received ${messageLines.length} message(s) with Latin-1: ${messageLines.join(", ")}');
+            }
+          } catch (e2) {
+            // If both decodings fail, log the raw data for debugging
+            print('Failed to decode Bluetooth data: ${data.toString()}');
+          }
         }
       },
       onDone: () {

@@ -15,7 +15,8 @@ class BluetoothConnecting extends BluetoothState {}
 
 class BluetoothConnected extends BluetoothState {
   final bt.BluetoothDevice device;
-  BluetoothConnected(this.device);
+  final List<String> messages;
+  BluetoothConnected(this.device, {this.messages = const []});
 }
 
 class BluetoothDisconnected extends BluetoothState {}
@@ -26,8 +27,3 @@ class BluetoothError extends BluetoothState {
 }
 
 class BluetoothNotEnabled extends BluetoothState {}
-
-class BluetoothMessagesReceived extends BluetoothState {
-  final List<String> messages;
-  BluetoothMessagesReceived(this.messages);
-}
