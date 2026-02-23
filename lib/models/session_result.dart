@@ -1,37 +1,41 @@
 import 'sensor_reading.dart';
+import 'processed_frame.dart';
+import '../utils/post_processor.dart';
 
 class SessionResult {
   final List<SensorReading> readings;
+
+  /// Post-processed world-frame data (velocity, position, height, force)
+  final List<ProcessedFrame> frames;
 
   /// Athlete weight in kg (used for force calculation)
   final double athleteWeightKg;
   final String athleteName;
   final DateTime date;
 
-  /// Index into [readings] at which peak force occurred
-  final int peakReadingIndex;
+  /// Index into [frames] at which peak force occurred
+  final int peakForceIndex;
+
+  /// Index into [frames] at which max height occurred
+  final int maxHeightIndex;
+
+  /// Index into [frames] at which max speed occurred
+  final int maxSpeedIndex;
+
+  /// Calibration window end index (where movement starts)
+  final int calibEndIndex;
 
   const SessionResult({
     required this.readings,
+    required this.frames,
     required this.athleteWeightKg,
     required this.athleteName,
     required this.date,
-    required this.peakReadingIndex,
+    required this.peakForceIndex,
+    required this.maxHeightIndex,
+    required this.maxSpeedIndex,
+    required this.calibEndIndex,
   });
-
-  static int _findPeakIndex(List<SensorReading> readings) {
-    if (readings.isEmpty) return 0;
-    double max = -1;
-    int idx = 0;
-    for (int i = 0; i < readings.length; i++) {
-      final mag = readings[i].accelMagnitude;
-      if (mag > max) {
-        max = mag;
-        idx = i;
-      }
-    }
-    return idx;
-  }
 
   factory SessionResult.fromReadings({
     required List<SensorReading> readings,
@@ -39,50 +43,98 @@ class SessionResult {
     required String athleteName,
     required DateTime date,
   }) {
+    // Run post-processing pipeline
+    final processor = PostProcessor(
+      rawReadings: readings,
+      athleteMassKg: athleteWeightKg,
+    );
+    final frames = processor.process();
+
+    // Find peaks
+    int peakForce = 0, maxHeight = 0, maxSpeed = 0;
+    double pf = -1, mh = -999, ms = -1;
+    for (int i = 0; i < frames.length; i++) {
+      if (frames[i].forceKg > pf) {
+        pf = frames[i].forceKg;
+        peakForce = i;
+      }
+      if (frames[i].height > mh) {
+        mh = frames[i].height;
+        maxHeight = i;
+      }
+      if (frames[i].speed > ms) {
+        ms = frames[i].speed;
+        maxSpeed = i;
+      }
+    }
+
     return SessionResult(
       readings: readings,
+      frames: frames,
       athleteWeightKg: athleteWeightKg,
       athleteName: athleteName,
       date: date,
-      peakReadingIndex: _findPeakIndex(readings),
+      peakForceIndex: peakForce,
+      maxHeightIndex: maxHeight,
+      maxSpeedIndex: maxSpeed,
+      calibEndIndex: frames.length > 25 ? 25 : frames.length ~/ 2,
     );
   }
 
-  /// Peak linear acceleration in m/s²
-  double get peakAccelMagnitude => readings.isEmpty
+  // ── Convenience getters ────────────────────────────────────
+
+  ProcessedFrame? get peakForceFrame =>
+      frames.isEmpty ? null : frames[peakForceIndex];
+
+  ProcessedFrame? get maxHeightFrame =>
+      frames.isEmpty ? null : frames[maxHeightIndex];
+
+  ProcessedFrame? get maxSpeedFrame =>
+      frames.isEmpty ? null : frames[maxSpeedIndex];
+
+  double get peakForceKg => peakForceFrame?.forceKg ?? 0;
+  double get peakForceN => peakForceFrame?.forceN ?? 0;
+  double get maxHeight => maxHeightFrame?.height ?? 0;
+  double get maxSpeed => maxSpeedFrame?.speed ?? 0;
+  double get maxVerticalSpeed => frames.isEmpty
       ? 0
-      : readings[peakReadingIndex].accelMagnitude;
+      : frames.map((f) => f.verticalSpeed).reduce((a, b) => a > b ? a : b);
 
-  /// Peak force in kg-force: F = m * a / g  (where g ≈ 9.81)
-  double get peakForceKg =>
-      (athleteWeightKg * peakAccelMagnitude) / 9.81;
+  double get peakAccelMagnitude => peakForceFrame?.accelMagWorld ?? 0;
 
-  /// Session duration in seconds
-  double get durationSeconds => readings.isEmpty
-      ? 0
-      : readings.last.timeSeconds;
-
-  SensorReading? get peakReading =>
-      readings.isEmpty ? null : readings[peakReadingIndex];
+  double get durationSeconds =>
+      frames.isEmpty ? 0 : frames.last.timeSec;
 
   Map<String, dynamic> toJson() => {
         'athleteWeightKg': athleteWeightKg,
         'athleteName': athleteName,
         'date': date.toIso8601String(),
-        'peakReadingIndex': peakReadingIndex,
+        'peakForceIndex': peakForceIndex,
+        'maxHeightIndex': maxHeightIndex,
+        'maxSpeedIndex': maxSpeedIndex,
+        'calibEndIndex': calibEndIndex,
         'readings': readings.map((r) => r.toJson()).toList(),
+        'frames': frames.map((f) => f.toJson()).toList(),
       };
 
   factory SessionResult.fromJson(Map<String, dynamic> json) {
     final readings = (json['readings'] as List)
         .map((r) => SensorReading.fromJson(r as Map<String, dynamic>))
         .toList();
+    final frames = (json['frames'] as List?)
+            ?.map((f) => ProcessedFrame.fromJson(f as Map<String, dynamic>))
+            .toList() ??
+        [];
     return SessionResult(
       readings: readings,
+      frames: frames,
       athleteWeightKg: (json['athleteWeightKg'] as num).toDouble(),
       athleteName: json['athleteName'] as String,
       date: DateTime.parse(json['date'] as String),
-      peakReadingIndex: json['peakReadingIndex'] as int,
+      peakForceIndex: json['peakForceIndex'] as int? ?? 0,
+      maxHeightIndex: json['maxHeightIndex'] as int? ?? 0,
+      maxSpeedIndex: json['maxSpeedIndex'] as int? ?? 0,
+      calibEndIndex: json['calibEndIndex'] as int? ?? 0,
     );
   }
 }

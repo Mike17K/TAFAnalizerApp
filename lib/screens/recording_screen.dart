@@ -71,15 +71,20 @@ class _RecordingScreenState extends State<RecordingScreen>
           }
         },
         builder: (context, state) {
+          final isCalibrating = state is SensorCalibrating;
           final recordingState = state is SensorRecording ? state : null;
           final isRecording = recordingState != null;
+          final isProcessing = state is SensorProcessing;
           final latest = recordingState?.latest;
-          final elapsedMs = recordingState?.elapsedMs ?? 0;
+          final calibState = state is SensorCalibrating ? state : null;
+          final elapsedMs = calibState?.elapsedMs
+              ?? recordingState?.elapsedMs ?? 0;
+          final isActive = isCalibrating || isRecording;
 
           return PopScope(
-            canPop: !isRecording,
+            canPop: !isActive && !isProcessing,
             onPopInvokedWithResult: (didPop, _) {
-              if (!didPop && isRecording) {
+              if (!didPop && isActive) {
                 _showStopDialog(context);
               }
             },
@@ -89,12 +94,18 @@ class _RecordingScreenState extends State<RecordingScreen>
                 backgroundColor: Colors.transparent,
                 elevation: 0,
                 title: Text(
-                  isRecording ? 'Recording...' : 'Ready',
+                  isProcessing
+                      ? 'Processing...'
+                      : isCalibrating
+                          ? 'Calibrating...'
+                          : isRecording
+                              ? 'Recording...'
+                              : 'Ready',
                   style: theme.textTheme.titleLarge
                       ?.copyWith(fontWeight: FontWeight.w800),
                 ),
                 actions: [
-                  if (isRecording)
+                  if (isActive)
                     Padding(
                       padding: const EdgeInsets.only(right: 16),
                       child: Chip(
@@ -114,34 +125,44 @@ class _RecordingScreenState extends State<RecordingScreen>
                   children: [
                     // Live readings panel
                     Expanded(
-                      child: isRecording && latest != null
-                          ? _LiveReadingsPanel(reading: latest)
-                          : _IdlePanel(profile: widget.profile),
+                      child: isProcessing
+                          ? _ProcessingPanel()
+                          : isCalibrating
+                              ? _CalibrationPanel(
+                                  progress: calibState!.progress,
+                                  samplesCollected: calibState.samplesCollected,
+                                  samplesNeeded: calibState.samplesNeeded,
+                                )
+                              : isRecording && latest != null
+                                  ? _LiveReadingsPanel(reading: latest)
+                                  : _IdlePanel(profile: widget.profile),
                     ),
 
                     // Big action button at bottom
                     Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 32, vertical: 24),
-                      child: isRecording
-                          ? _StopButton(
-                              onStop: () => context
-                                  .read<SensorBloc>()
-                                  .add(StopRecordingEvent()))
-                          : ScaleTransition(
-                              scale: _pulseAnim,
-                              child: _StartButton(
-                                onStart: () {
-                                  context.read<SensorBloc>().add(
-                                        StartRecordingEvent(
-                                          athleteWeightKg:
-                                              widget.profile.weightKg,
-                                          athleteName: widget.profile.name,
-                                        ),
-                                      );
-                                },
-                              ),
-                            ),
+                      child: isProcessing
+                          ? const SizedBox.shrink()
+                          : isActive
+                              ? _StopButton(
+                                  onStop: () => context
+                                      .read<SensorBloc>()
+                                      .add(StopRecordingEvent()))
+                              : ScaleTransition(
+                                  scale: _pulseAnim,
+                                  child: _StartButton(
+                                    onStart: () {
+                                      context.read<SensorBloc>().add(
+                                            StartRecordingEvent(
+                                              athleteWeightKg:
+                                                  widget.profile.weightKg,
+                                              athleteName: widget.profile.name,
+                                            ),
+                                          );
+                                    },
+                                  ),
+                                ),
                     ),
                   ],
                 ),
@@ -240,6 +261,123 @@ class _StopButton extends StatelessWidget {
 }
 
 // 
+class _CalibrationPanel extends StatelessWidget {
+  final double progress;
+  final int samplesCollected;
+  final int samplesNeeded;
+
+  const _CalibrationPanel({
+    required this.progress,
+    required this.samplesCollected,
+    required this.samplesNeeded,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 120,
+              height: 120,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox(
+                    width: 120,
+                    height: 120,
+                    child: CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 8,
+                      backgroundColor: cs.outlineVariant.withOpacity(0.3),
+                      color: cs.primary,
+                    ),
+                  ),
+                  Icon(Icons.phone_android, size: 48,
+                      color: cs.primary.withOpacity(0.8)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Calibrating Sensors',
+              style: theme.textTheme.headlineSmall
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Keep the phone steady and still.\n'
+              'Detecting gravity direction...',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '$samplesCollected / $samplesNeeded samples',
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: cs.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// 
+class _ProcessingPanel extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 80,
+              height: 80,
+              child: CircularProgressIndicator(
+                strokeWidth: 6,
+                color: cs.primary,
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Processing Jump Data',
+              style: theme.textTheme.headlineSmall
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Applying calibration, coordinate transform,\n'
+              'integration, and drift correction...',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// 
 class _IdlePanel extends StatelessWidget {
   final AthleteProfile profile;
   const _IdlePanel({required this.profile});
@@ -282,7 +420,9 @@ class _IdlePanel extends StatelessWidget {
             ),
             const SizedBox(height: 24),
             Text(
-              'Secure your phone to your chest, then press START',
+              'Place phone steady on your body, press START.\n'
+              'Keep still during calibration (~1 sec),\n'
+              'then perform your jump or approach.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: cs.onSurfaceVariant,

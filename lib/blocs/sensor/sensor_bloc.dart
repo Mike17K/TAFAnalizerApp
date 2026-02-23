@@ -17,6 +17,8 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
   static const double _lpAlpha = 0.2;      // 0.8*prev + 0.2*new
   static const double _cfAccelW = 0.02;    // complementary filter: accel trust
   static const double _cfGyroW  = 0.98;    // complementary filter: gyro trust
+  static const int _calibSamples = 50;     // ~1 second at 50Hz
+  static const double _calibVarianceThresh = 0.15; // m/s² variance threshold
 
   double _fAx = 0, _fAy = 0, _fAz = 0;
   double _fGx = 0, _fGy = 0, _fGz = 0;
@@ -28,6 +30,7 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
   double _athleteWeightKg = 70.0;
   final List<SensorReading> _readings = [];
   bool _isFirst = true;
+  bool _calibrated = false;
 
   double _rawAx = 0, _rawAy = 0, _rawAz = 0;
   double _rawGx = 0, _rawGy = 0, _rawGz = 0;
@@ -51,6 +54,7 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
     _sessionStart = DateTime.now();
     _lastSampleTime = _sessionStart;
     _isFirst = true;
+    _calibrated = false;
     _pitch = _roll = _yaw = 0;
     _fAx = _fAy = _fAz = _fGx = _fGy = _fGz = 0;
     _hasData = false;
@@ -65,7 +69,11 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
     ).listen((e) { _rawGx = e.x; _rawGy = e.y; _rawGz = e.z; },
         onError: (_) {});
 
-    emit(SensorRecording(readings: const [], elapsedMs: 0));
+    emit(SensorCalibrating(
+      samplesCollected: 0,
+      samplesNeeded: _calibSamples,
+      elapsedMs: 0,
+    ));
 
     // 50Hz timer — safe add() call outside emitter
     _timer = Timer.periodic(const Duration(milliseconds: 20), (_) {
@@ -75,16 +83,64 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
   }
 
   void _onSample(_SampleTakenEvent event, Emitter<SensorState> emit) {
-    if (state is! SensorRecording) return;
+    if (state is SensorIdle || state is SensorComplete || state is SensorError) return;
     _readings.add(event.reading);
-    // Refresh UI every 5 samples (~10 Hz)
-    if (_readings.length % 5 == 0) {
+    final count = _readings.length;
+    final elapsedMs = event.reading.timestampMs;
+
+    // Calibration phase
+    if (!_calibrated) {
+      if (count < _calibSamples) {
+        if (count % 5 == 0) {
+          emit(SensorCalibrating(
+            samplesCollected: count,
+            samplesNeeded: _calibSamples,
+            elapsedMs: elapsedMs,
+          ));
+        }
+        return;
+      }
+      // Check if stationary: compute variance of accel magnitude
+      if (_isStationary(_readings)) {
+        _calibrated = true;
+        emit(SensorRecording(
+          readings: List.from(_readings),
+          latest: event.reading,
+          elapsedMs: elapsedMs,
+          calibrated: true,
+        ));
+      } else {
+        // Keep collecting — slide window
+        emit(SensorCalibrating(
+          samplesCollected: count,
+          samplesNeeded: _calibSamples,
+          elapsedMs: elapsedMs,
+        ));
+      }
+      return;
+    }
+
+    // Recording phase — refresh UI every 5 samples (~10 Hz)
+    if (count % 5 == 0) {
       emit(SensorRecording(
         readings: List.from(_readings),
         latest: event.reading,
-        elapsedMs: event.reading.timestampMs,
+        elapsedMs: elapsedMs,
+        calibrated: true,
       ));
     }
+  }
+
+  bool _isStationary(List<SensorReading> readings) {
+    final last = readings.length < _calibSamples
+        ? readings
+        : readings.sublist(readings.length - _calibSamples);
+    if (last.length < 10) return false;
+
+    final mags = last.map((r) => r.accelMagnitude).toList();
+    final mean = mags.reduce((a, b) => a + b) / mags.length;
+    final variance = mags.map((m) => (m - mean) * (m - mean)).reduce((a, b) => a + b) / mags.length;
+    return sqrt(variance) < _calibVarianceThresh;
   }
 
   SensorReading _computeReading() {
@@ -130,12 +186,15 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
       emit(SensorError('No data recorded. Please try again.'));
       return;
     }
-    emit(SensorComplete(SessionResult.fromReadings(
+    emit(SensorProcessing());
+    // Post-processing is done inside SessionResult.fromReadings (via PostProcessor)
+    final result = SessionResult.fromReadings(
       readings: List.from(_readings),
       athleteWeightKg: _athleteWeightKg,
       athleteName: _athleteName,
       date: _sessionStart ?? DateTime.now(),
-    )));
+    );
+    emit(SensorComplete(result));
   }
 
   void _onReset(ResetSensorEvent event, Emitter<SensorState> emit) async {

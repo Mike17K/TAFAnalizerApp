@@ -1,12 +1,11 @@
-﻿import 'dart:math';
-import 'package:fl_chart/fl_chart.dart';
+﻿import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../blocs/leaderboard/leaderboard_bloc.dart';
 import '../blocs/leaderboard/leaderboard_event.dart';
 import '../models/athlete_profile.dart';
 import '../models/leaderboard_entry.dart';
-import '../models/sensor_reading.dart';
+import '../models/processed_frame.dart';
 import '../models/session_result.dart';
 import '../widgets/orientation_3d_widget.dart';
 
@@ -33,10 +32,10 @@ class _ResultsScreenState extends State<ResultsScreen>
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 4, vsync: this);
-    // Initialise scrubber at peak
-    if (widget.result.readings.isNotEmpty) {
+    // Initialise scrubber at peak height
+    if (widget.result.frames.isNotEmpty) {
       _scrubberPosition =
-          widget.result.peakReadingIndex / (widget.result.readings.length - 1);
+          widget.result.maxHeightIndex / (widget.result.frames.length - 1);
     }
   }
 
@@ -46,19 +45,19 @@ class _ResultsScreenState extends State<ResultsScreen>
     super.dispose();
   }
 
-  // Downsample readings to at most maxPts for chart performance
-  List<SensorReading> _downsample(int maxPts) {
-    final r = widget.result.readings;
-    if (r.length <= maxPts) return r;
-    final step = r.length / maxPts;
-    return List.generate(maxPts, (i) => r[(i * step).floor()]);
+  /// Downsample processed frames for chart performance
+  List<ProcessedFrame> _downsample(int maxPts) {
+    final f = widget.result.frames;
+    if (f.length <= maxPts) return f;
+    final step = f.length / maxPts;
+    return List.generate(maxPts, (i) => f[(i * step).floor()]);
   }
 
-  SensorReading get _currentReading {
-    final idx = (_scrubberPosition * (widget.result.readings.length - 1))
+  ProcessedFrame get _currentFrame {
+    final idx = (_scrubberPosition * (widget.result.frames.length - 1))
         .round()
-        .clamp(0, widget.result.readings.length - 1);
-    return widget.result.readings[idx];
+        .clamp(0, widget.result.frames.length - 1);
+    return widget.result.frames[idx];
   }
 
   String _formatDur(double secs) {
@@ -74,14 +73,13 @@ class _ResultsScreenState extends State<ResultsScreen>
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final result = widget.result;
-    final peak = result.peakReading;
 
     return Scaffold(
       backgroundColor: cs.surface,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Text('Session Results',
+        title: Text('Jump Analysis',
             style:
                 theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800)),
         actions: [
@@ -95,48 +93,22 @@ class _ResultsScreenState extends State<ResultsScreen>
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
         children: [
-          //  Stats row 
+          // Stats row
           _buildStatsRow(cs, theme, result),
 
           const SizedBox(height: 20),
-          //  Charts section 
+          // Charts section
           _buildChartsSection(theme, cs),
 
           const SizedBox(height: 20),
-          //  Force Direction 3D 
-          if (peak != null) ...[
-            _SectionHeader('Peak Force Direction', Icons.bolt),
-            const SizedBox(height: 12),
-            Center(
-              child: ForceVector3D(
-                ax: peak.accelX,
-                ay: peak.accelY,
-                az: peak.accelZ,
-                peakForceKg: result.peakForceKg,
-                size: 260,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Center(
-              child: Text(
-                'Direction of peak ${result.peakForceKg.toStringAsFixed(1)} kg force '
-                'at t=${_formatDur(peak.timeSeconds)}',
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: cs.onSurfaceVariant),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ],
-
-          const SizedBox(height: 20),
-          //  3D Orientation Replay 
-          _SectionHeader('Orientation Replay', Icons.accessibility_new),
+          // 3D Orientation Replay with corrected athlete angles
+          _SectionHeader('Athlete Orientation', Icons.accessibility_new),
           const SizedBox(height: 8),
           Center(
             child: OrientationFigure3D(
-              pitch: _currentReading.pitch,
-              roll: _currentReading.roll,
-              yaw: _currentReading.yaw,
+              pitch: _currentFrame.athletePitch,
+              roll: _currentFrame.athleteRoll,
+              yaw: _currentFrame.athleteYaw,
               primaryColor: cs.primary,
               accentColor: cs.secondary,
               size: 260,
@@ -147,14 +119,13 @@ class _ResultsScreenState extends State<ResultsScreen>
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                'P:${_currentReading.pitch.toStringAsFixed(1)}  '
-                'R:${_currentReading.roll.toStringAsFixed(1)}  '
-                'Y:${_currentReading.yaw.toStringAsFixed(1)}',
+                'Speed: ${_currentFrame.speed.toStringAsFixed(2)} m/s  '
+                'Height: ${_currentFrame.height.toStringAsFixed(3)} m',
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: cs.onSurfaceVariant),
               ),
               Text(
-                't=${_formatDur(_currentReading.timeSeconds)}',
+                't=${_formatDur(_currentFrame.timeSec)}',
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: cs.onSurfaceVariant),
               ),
@@ -176,7 +147,7 @@ class _ResultsScreenState extends State<ResultsScreen>
           ),
 
           const SizedBox(height: 20),
-          //  Leaderboard button 
+          // Leaderboard button
           _buildLeaderboardButton(context, cs, theme, result),
           const SizedBox(height: 32),
         ],
@@ -189,18 +160,18 @@ class _ResultsScreenState extends State<ResultsScreen>
       children: [
         Expanded(
           child: _StatCard(
-            label: 'Peak Force',
-            value: '${result.peakForceKg.toStringAsFixed(1)}',
-            unit: 'kg',
-            icon: Icons.fitness_center,
+            label: 'Peak Height',
+            value: result.maxHeight.toStringAsFixed(2),
+            unit: 'm',
+            icon: Icons.height,
             color: cs.primary,
           ),
         ),
         const SizedBox(width: 10),
         Expanded(
           child: _StatCard(
-            label: 'Peak Accel',
-            value: '${result.peakAccelMagnitude.toStringAsFixed(2)}',
+            label: 'Max Speed',
+            value: result.maxSpeed.toStringAsFixed(2),
             unit: 'm/s',
             icon: Icons.speed,
             color: cs.secondary,
@@ -209,10 +180,10 @@ class _ResultsScreenState extends State<ResultsScreen>
         const SizedBox(width: 10),
         Expanded(
           child: _StatCard(
-            label: 'Duration',
-            value: _formatDur(result.durationSeconds),
-            unit: '',
-            icon: Icons.timer_outlined,
+            label: 'Peak Force',
+            value: result.peakForceKg.toStringAsFixed(1),
+            unit: 'kg',
+            icon: Icons.fitness_center,
             color: cs.tertiary,
           ),
         ),
@@ -226,7 +197,7 @@ class _ResultsScreenState extends State<ResultsScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionHeader('Sensor Data', Icons.show_chart),
+        _SectionHeader('Jump Data', Icons.show_chart),
         const SizedBox(height: 8),
         Container(
           decoration: BoxDecoration(
@@ -242,10 +213,10 @@ class _ResultsScreenState extends State<ResultsScreen>
                 indicatorColor: cs.primary,
                 labelStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
                 tabs: const [
-                  Tab(text: 'ACCEL'),
-                  Tab(text: 'EULER'),
-                  Tab(text: 'GYRO'),
-                  Tab(text: 'GYRO |M|'),
+                  Tab(text: 'SPEED'),
+                  Tab(text: 'HEIGHT'),
+                  Tab(text: 'POSITION'),
+                  Tab(text: 'FORCE'),
                 ],
               ),
               SizedBox(
@@ -253,38 +224,47 @@ class _ResultsScreenState extends State<ResultsScreen>
                 child: TabBarView(
                   controller: _tabCtrl,
                   children: [
-                    // 1. Accelerometer x/y/z
-                    _SensorChart(
-                      readings: ds,
-                      line1: (r) => r.accelX,
-                      line2: (r) => r.accelY,
-                      line3: (r) => r.accelZ,
-                      l1Name: 'X', l2Name: 'Y', l3Name: 'Z',
+                    // 1. Speed: total, vertical, horizontal
+                    _FrameChart(
+                      frames: ds,
+                      lines: [
+                        _ChartLine('Total', Colors.blue, (f) => f.speed),
+                        _ChartLine('Vertical', Colors.green, (f) => f.verticalSpeed),
+                        _ChartLine('Horizontal', Colors.orange, (f) => f.horizontalSpeed),
+                      ],
                       unit: 'm/s',
-                      peakXs: [widget.result.readings[widget.result.peakReadingIndex].timeSeconds],
+                      peakTimeSec: widget.result.maxSpeedFrame?.timeSec,
                     ),
-                    // 2. Euler angles
-                    _SensorChart(
-                      readings: ds,
-                      line1: (r) => r.pitch,
-                      line2: (r) => r.roll,
-                      line3: (r) => r.yaw,
-                      l1Name: 'Pitch', l2Name: 'Roll', l3Name: 'Yaw',
-                      unit: '',
-                      peakXs: [],
+                    // 2. Height (posY)
+                    _FrameChart(
+                      frames: ds,
+                      lines: [
+                        _ChartLine('Height', Colors.teal, (f) => f.height),
+                      ],
+                      unit: 'm',
+                      peakTimeSec: widget.result.maxHeightFrame?.timeSec,
+                      fillBelow: true,
                     ),
-                    // 3. Gyroscope x/y/z
-                    _SensorChart(
-                      readings: ds,
-                      line1: (r) => r.gyroX,
-                      line2: (r) => r.gyroY,
-                      line3: (r) => r.gyroZ,
-                      l1Name: 'X', l2Name: 'Y', l3Name: 'Z',
-                      unit: 'rad/s',
-                      peakXs: [widget.result.readings[widget.result.peakReadingIndex].timeSeconds],
+                    // 3. Position XYZ
+                    _FrameChart(
+                      frames: ds,
+                      lines: [
+                        _ChartLine('X', Colors.red, (f) => f.posX),
+                        _ChartLine('Y (height)', Colors.green, (f) => f.posY),
+                        _ChartLine('Z', Colors.blue, (f) => f.posZ),
+                      ],
+                      unit: 'm',
                     ),
-                    // 4. Gyro magnitude
-                    _GyroMagnitudeChart(readings: ds),
+                    // 4. Force (absolute)
+                    _FrameChart(
+                      frames: ds,
+                      lines: [
+                        _ChartLine('Force', Colors.deepOrange, (f) => f.forceKg),
+                      ],
+                      unit: 'kg',
+                      peakTimeSec: widget.result.peakForceFrame?.timeSec,
+                      fillBelow: true,
+                    ),
                   ],
                 ),
               ),
@@ -331,10 +311,12 @@ class _ResultsScreenState extends State<ResultsScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _ResultRow('Athlete', result.athleteName),
+                _ResultRow('Peak Height',
+                    '${result.maxHeight.toStringAsFixed(3)} m'),
+                _ResultRow('Max Speed',
+                    '${result.maxSpeed.toStringAsFixed(2)} m/s'),
                 _ResultRow('Peak Force',
-                    '${result.peakForceKg.toStringAsFixed(2)} kg'),
-                _ResultRow('Peak Accel',
-                    '${result.peakAccelMagnitude.toStringAsFixed(3)} m/s'),
+                    '${result.peakForceKg.toStringAsFixed(1)} kg'),
                 const Divider(height: 16),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -395,6 +377,10 @@ class _ResultsScreenState extends State<ResultsScreen>
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reusable helper widgets
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _ResultRow extends StatelessWidget {
   final String label;
@@ -495,47 +481,57 @@ class _StatCard extends StatelessWidget {
   }
 }
 
-// 
-// Sensor line chart (3 lines: x=red, y=green, z=blue)
-// 
-class _SensorChart extends StatelessWidget {
-  final List<SensorReading> readings;
-  final double Function(SensorReading) line1;
-  final double Function(SensorReading) line2;
-  final double Function(SensorReading) line3;
-  final String l1Name, l2Name, l3Name, unit;
-  final List<double> peakXs;
+// ─────────────────────────────────────────────────────────────────────────────
+// Chart widgets for ProcessedFrame data
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const _SensorChart({
-    required this.readings,
-    required this.line1,
-    required this.line2,
-    required this.line3,
-    required this.l1Name,
-    required this.l2Name,
-    required this.l3Name,
+class _ChartLine {
+  final String name;
+  final Color color;
+  final double Function(ProcessedFrame) valueGetter;
+  const _ChartLine(this.name, this.color, this.valueGetter);
+}
+
+class _FrameChart extends StatelessWidget {
+  final List<ProcessedFrame> frames;
+  final List<_ChartLine> lines;
+  final String unit;
+  final double? peakTimeSec;
+  final bool fillBelow;
+
+  const _FrameChart({
+    required this.frames,
+    required this.lines,
     required this.unit,
-    required this.peakXs,
+    this.peakTimeSec,
+    this.fillBelow = false,
   });
-
-  List<FlSpot> _spots(double Function(SensorReading) fn) =>
-      readings.map((r) => FlSpot(r.timeSeconds, fn(r))).toList();
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    if (frames.isEmpty) return const Center(child: Text('No data'));
 
-    if (readings.isEmpty) {
-      return const Center(child: Text('No data'));
+    // Build spots for each line
+    final allSpots = <List<FlSpot>>[];
+    double globalMin = double.infinity;
+    double globalMax = double.negativeInfinity;
+
+    for (final line in lines) {
+      final spots = frames.map((f) {
+        final v = line.valueGetter(f);
+        return FlSpot(f.timeSec, v);
+      }).toList();
+      allSpots.add(spots);
+      for (final s in spots) {
+        if (s.y < globalMin) globalMin = s.y;
+        if (s.y > globalMax) globalMax = s.y;
+      }
     }
 
-    final l1 = _spots(line1);
-    final l2 = _spots(line2);
-    final l3 = _spots(line3);
-
-    final allVals = [...l1, ...l2, ...l3].map((s) => s.y);
-    final minY = allVals.reduce(min) * 1.2;
-    final maxY = allVals.reduce(max) * 1.2;
+    final range = (globalMax - globalMin).clamp(0.01, double.infinity);
+    final minY = globalMin - range * 0.15;
+    final maxY = globalMax + range * 0.15;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 16, 16, 16),
@@ -544,13 +540,12 @@ class _SensorChart extends StatelessWidget {
           // Legend
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _LegendDot(Colors.red, l1Name),
-              const SizedBox(width: 12),
-              _LegendDot(Colors.green, l2Name),
-              const SizedBox(width: 12),
-              _LegendDot(Colors.blue, l3Name),
-            ],
+            children: lines.map((l) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: _LegendDot(l.color, l.name),
+              );
+            }).toList(),
           ),
           const SizedBox(height: 4),
           Expanded(
@@ -569,7 +564,7 @@ class _SensorChart extends StatelessWidget {
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
-                      reservedSize: 36,
+                      reservedSize: 40,
                       getTitlesWidget: (v, _) => Text(
                         v.toStringAsFixed(1),
                         style: TextStyle(
@@ -586,7 +581,9 @@ class _SensorChart extends StatelessWidget {
                         style: TextStyle(
                             fontSize: 9, color: cs.onSurfaceVariant),
                       ),
-                      interval: readings.last.timeSeconds / 4,
+                      interval: frames.last.timeSec > 0
+                          ? frames.last.timeSec / 4
+                          : 1,
                     ),
                   ),
                   rightTitles:
@@ -597,27 +594,41 @@ class _SensorChart extends StatelessWidget {
                 minY: minY,
                 maxY: maxY,
                 extraLinesData: ExtraLinesData(
-                  verticalLines: peakXs
-                      .map((x) => VerticalLine(
-                            x: x,
+                  verticalLines: peakTimeSec != null
+                      ? [
+                          VerticalLine(
+                            x: peakTimeSec!,
                             color: cs.error.withOpacity(0.6),
                             strokeWidth: 1.5,
                             dashArray: [4, 4],
-                          ))
-                      .toList(),
+                          ),
+                        ]
+                      : [],
                 ),
                 lineBarsData: [
-                  _bar(l1, Colors.red),
-                  _bar(l2, Colors.green),
-                  _bar(l3, Colors.blue),
+                  for (int i = 0; i < lines.length; i++)
+                    LineChartBarData(
+                      spots: allSpots[i],
+                      color: lines[i].color,
+                      barWidth: 1.8,
+                      isCurved: true,
+                      curveSmoothness: 0.15,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(
+                        show: fillBelow && lines.length == 1,
+                        color: lines[i].color.withOpacity(0.12),
+                      ),
+                    ),
                 ],
                 lineTouchData: LineTouchData(
                   touchTooltipData: LineTouchTooltipData(
                     getTooltipItems: (spots) => spots
                         .map((s) => LineTooltipItem(
-                              s.y.toStringAsFixed(2),
+                              '${s.y.toStringAsFixed(2)} $unit',
                               TextStyle(
-                                  color: s.bar.color, fontWeight: FontWeight.bold),
+                                  color: s.bar.color,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 11),
                             ))
                         .toList(),
                   ),
@@ -629,15 +640,6 @@ class _SensorChart extends StatelessWidget {
       ),
     );
   }
-
-  LineChartBarData _bar(List<FlSpot> spots, Color color) => LineChartBarData(
-        spots: spots,
-        color: color,
-        barWidth: 1.5,
-        isCurved: false,
-        dotData: const FlDotData(show: false),
-        belowBarData: BarAreaData(show: false),
-      );
 }
 
 class _LegendDot extends StatelessWidget {
@@ -648,93 +650,13 @@ class _LegendDot extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(children: [
       Container(
-          width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
       const SizedBox(width: 4),
-      Text(label, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold)),
+      Text(label,
+          style: TextStyle(
+              fontSize: 10, color: color, fontWeight: FontWeight.bold)),
     ]);
-  }
-}
-
-class _GyroMagnitudeChart extends StatelessWidget {
-  final List<SensorReading> readings;
-  const _GyroMagnitudeChart({required this.readings});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    if (readings.isEmpty) return const Center(child: Text('No data'));
-
-    final spots = readings
-        .map((r) => FlSpot(r.timeSeconds, r.gyroMagnitude))
-        .toList();
-    final maxY = spots.map((s) => s.y).reduce(max) * 1.2;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 16, 16, 16),
-      child: Column(
-        children: [
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            _LegendDot(cs.secondary, 'Angular Magnitude (rad/s)'),
-          ]),
-          const SizedBox(height: 4),
-          Expanded(
-            child: LineChart(
-              LineChartData(
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  getDrawingHorizontalLine: (v) => FlLine(
-                    color: cs.outlineVariant.withOpacity(0.4),
-                    strokeWidth: 1,
-                  ),
-                ),
-                borderData: FlBorderData(show: false),
-                titlesData: FlTitlesData(
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 36,
-                      getTitlesWidget: (v, _) => Text(
-                        v.toStringAsFixed(1),
-                        style: TextStyle(fontSize: 9, color: cs.onSurfaceVariant),
-                      ),
-                    ),
-                  ),
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 20,
-                      getTitlesWidget: (v, _) => Text(
-                        '${v.toStringAsFixed(1)}s',
-                        style: TextStyle(fontSize: 9, color: cs.onSurfaceVariant),
-                      ),
-                      interval: readings.last.timeSeconds / 4,
-                    ),
-                  ),
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                ),
-                minY: 0,
-                maxY: maxY,
-                lineBarsData: [
-                  LineChartBarData(
-                    spots: spots,
-                    color: cs.secondary,
-                    barWidth: 2,
-                    isCurved: true,
-                    curveSmoothness: 0.2,
-                    dotData: const FlDotData(show: false),
-                    belowBarData: BarAreaData(
-                      show: true,
-                      color: cs.secondary.withOpacity(0.12),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }
