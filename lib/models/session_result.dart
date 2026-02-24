@@ -13,7 +13,9 @@ class SessionResult {
   final String athleteName;
   final DateTime date;
 
-  /// Index into [frames] at which peak force occurred
+  /// Index into [frames] at which peak propulsion force occurred.
+  /// Only considers frames where isPropulsion == true (speed increasing,
+  /// vy >= 0). Falls back to overall peak if no propulsion frames exist.
   final int peakForceIndex;
 
   /// Index into [frames] at which max height occurred
@@ -21,9 +23,6 @@ class SessionResult {
 
   /// Index into [frames] at which max speed occurred
   final int maxSpeedIndex;
-
-  /// Calibration window end index (where movement starts)
-  final int calibEndIndex;
 
   const SessionResult({
     required this.readings,
@@ -34,7 +33,6 @@ class SessionResult {
     required this.peakForceIndex,
     required this.maxHeightIndex,
     required this.maxSpeedIndex,
-    required this.calibEndIndex,
   });
 
   factory SessionResult.fromReadings({
@@ -53,8 +51,18 @@ class SessionResult {
     // Find peaks
     int peakForce = 0, maxHeight = 0, maxSpeed = 0;
     double pf = -1, mh = -999, ms = -1;
+
+    // Peak force: only during propulsion (velocity increasing, vy >= 0)
+    double pfAll = -1;
+    int peakForceAll = 0;
     for (int i = 0; i < frames.length; i++) {
-      if (frames[i].forceKg > pf) {
+      // Track overall peak as fallback
+      if (frames[i].forceKg > pfAll) {
+        pfAll = frames[i].forceKg;
+        peakForceAll = i;
+      }
+      // Propulsion-only peak force
+      if (frames[i].isPropulsion && frames[i].forceKg > pf) {
         pf = frames[i].forceKg;
         peakForce = i;
       }
@@ -68,6 +76,9 @@ class SessionResult {
       }
     }
 
+    // If no propulsion frames found, fall back to overall peak
+    if (pf < 0) peakForce = peakForceAll;
+
     return SessionResult(
       readings: readings,
       frames: frames,
@@ -77,7 +88,6 @@ class SessionResult {
       peakForceIndex: peakForce,
       maxHeightIndex: maxHeight,
       maxSpeedIndex: maxSpeed,
-      calibEndIndex: frames.length > 25 ? 25 : frames.length ~/ 2,
     );
   }
 
@@ -112,7 +122,6 @@ class SessionResult {
         'peakForceIndex': peakForceIndex,
         'maxHeightIndex': maxHeightIndex,
         'maxSpeedIndex': maxSpeedIndex,
-        'calibEndIndex': calibEndIndex,
         'readings': readings.map((r) => r.toJson()).toList(),
         'frames': frames.map((f) => f.toJson()).toList(),
       };
@@ -134,7 +143,6 @@ class SessionResult {
       peakForceIndex: json['peakForceIndex'] as int? ?? 0,
       maxHeightIndex: json['maxHeightIndex'] as int? ?? 0,
       maxSpeedIndex: json['maxSpeedIndex'] as int? ?? 0,
-      calibEndIndex: json['calibEndIndex'] as int? ?? 0,
     );
   }
 }

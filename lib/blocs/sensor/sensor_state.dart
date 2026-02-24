@@ -5,32 +5,21 @@ abstract class SensorState {}
 
 class SensorIdle extends SensorState {}
 
-/// Phone is stationary — calibrating gravity direction.
-class SensorCalibrating extends SensorState {
-  final int samplesCollected;
-  final int samplesNeeded;
-  final int elapsedMs;
-  SensorCalibrating({
-    required this.samplesCollected,
-    required this.samplesNeeded,
-    required this.elapsedMs,
-  });
-  double get progress =>
-      samplesNeeded == 0 ? 0 : (samplesCollected / samplesNeeded).clamp(0, 1);
+/// Phone is on the athlete's body — stabilizing before recording starts.
+class SensorStabilizing extends SensorState {
+  final int remainingSeconds;
+  SensorStabilizing({required this.remainingSeconds});
 }
 
 class SensorRecording extends SensorState {
   final List<SensorReading> readings;
   final SensorReading? latest;
   final int elapsedMs;
-  /// Whether calibration succeeded (gravity direction captured)
-  final bool calibrated;
 
   SensorRecording({
     required this.readings,
     this.latest,
     required this.elapsedMs,
-    this.calibrated = false,
   });
 }
 

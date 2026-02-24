@@ -31,7 +31,7 @@ class _ResultsScreenState extends State<ResultsScreen>
   @override
   void initState() {
     super.initState();
-    _tabCtrl = TabController(length: 4, vsync: this);
+    _tabCtrl = TabController(length: 3, vsync: this);
     // Initialise scrubber at peak height
     if (widget.result.frames.isNotEmpty) {
       _scrubberPosition =
@@ -213,10 +213,9 @@ class _ResultsScreenState extends State<ResultsScreen>
                 indicatorColor: cs.primary,
                 labelStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
                 tabs: const [
-                  Tab(text: 'SPEED'),
                   Tab(text: 'HEIGHT'),
-                  Tab(text: 'POSITION'),
                   Tab(text: 'FORCE'),
+                  Tab(text: 'SPEED'),
                 ],
               ),
               SizedBox(
@@ -224,18 +223,7 @@ class _ResultsScreenState extends State<ResultsScreen>
                 child: TabBarView(
                   controller: _tabCtrl,
                   children: [
-                    // 1. Speed: total, vertical, horizontal
-                    _FrameChart(
-                      frames: ds,
-                      lines: [
-                        _ChartLine('Total', Colors.blue, (f) => f.speed),
-                        _ChartLine('Vertical', Colors.green, (f) => f.verticalSpeed),
-                        _ChartLine('Horizontal', Colors.orange, (f) => f.horizontalSpeed),
-                      ],
-                      unit: 'm/s',
-                      peakTimeSec: widget.result.maxSpeedFrame?.timeSec,
-                    ),
-                    // 2. Height (posY)
+                    // 1. Height (posY)
                     _FrameChart(
                       frames: ds,
                       lines: [
@@ -245,17 +233,7 @@ class _ResultsScreenState extends State<ResultsScreen>
                       peakTimeSec: widget.result.maxHeightFrame?.timeSec,
                       fillBelow: true,
                     ),
-                    // 3. Position XYZ
-                    _FrameChart(
-                      frames: ds,
-                      lines: [
-                        _ChartLine('X', Colors.red, (f) => f.posX),
-                        _ChartLine('Y (height)', Colors.green, (f) => f.posY),
-                        _ChartLine('Z', Colors.blue, (f) => f.posZ),
-                      ],
-                      unit: 'm',
-                    ),
-                    // 4. Force (absolute)
+                    // 2. Force (propulsion-only peak marked)
                     _FrameChart(
                       frames: ds,
                       lines: [
@@ -264,6 +242,15 @@ class _ResultsScreenState extends State<ResultsScreen>
                       unit: 'kg',
                       peakTimeSec: widget.result.peakForceFrame?.timeSec,
                       fillBelow: true,
+                    ),
+                    // 3. Speed (total only)
+                    _FrameChart(
+                      frames: ds,
+                      lines: [
+                        _ChartLine('Speed', Colors.blue, (f) => f.speed),
+                      ],
+                      unit: 'm/s',
+                      peakTimeSec: widget.result.maxSpeedFrame?.timeSec,
                     ),
                   ],
                 ),

@@ -4,17 +4,17 @@ class SensorReading {
   /// Milliseconds since session start
   final int timestampMs;
 
-  // Low-pass filtered linear acceleration (gravity removed) in m/s²
+  // Raw accelerometer reading (includes gravity) in m/s²
   final double accelX;
   final double accelY;
   final double accelZ;
 
-  // Low-pass filtered angular velocity in rad/s
+  // Raw angular velocity in rad/s
   final double gyroX;
   final double gyroY;
   final double gyroZ;
 
-  // Euler angles in degrees (from complementary filter)
+  // Euler angles in degrees (instant from accel + gyro integration)
   final double pitch;
   final double roll;
   final double yaw;

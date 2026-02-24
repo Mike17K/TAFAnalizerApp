@@ -29,11 +29,17 @@ class ProcessedFrame {
   final double forceKg;
 
   // ── Corrected athlete orientation (degrees) ──
-  /// These are the athlete's body angles relative to standing upright,
-  /// after subtracting the phone's initial mounting orientation.
+  /// Body angles relative to standing upright, derived from gyroscope
+  /// integration relative to the initial phone orientation.
   final double athletePitch; // forward/back lean (°)
   final double athleteRoll;  // side lean (°)
   final double athleteYaw;   // rotation around vertical (°)
+
+  // ── Propulsion flag ──
+  /// True when the athlete is actively generating force (speed increasing
+  /// AND vertical velocity >= 0). Used to determine peak propulsion force,
+  /// excluding gravity/falling phases.
+  final bool isPropulsion;
 
   const ProcessedFrame({
     required this.timeSec,
@@ -51,6 +57,7 @@ class ProcessedFrame {
     required this.athletePitch,
     required this.athleteRoll,
     required this.athleteYaw,
+    this.isPropulsion = false,
   });
 
   double get speed => _mag3(velX, velY, velZ);
@@ -71,6 +78,7 @@ class ProcessedFrame {
         'px': posX, 'py': posY, 'pz': posZ,
         'fN': forceN, 'fKg': forceKg,
         'ap': athletePitch, 'ar': athleteRoll, 'ay': athleteYaw,
+        'prop': isPropulsion,
       };
 
   factory ProcessedFrame.fromJson(Map<String, dynamic> j) => ProcessedFrame(
@@ -89,5 +97,6 @@ class ProcessedFrame {
         athletePitch: (j['ap'] as num).toDouble(),
         athleteRoll: (j['ar'] as num).toDouble(),
         athleteYaw: (j['ay'] as num).toDouble(),
+        isPropulsion: j['prop'] as bool? ?? false,
       );
 }

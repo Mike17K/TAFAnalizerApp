@@ -71,15 +71,14 @@ class _RecordingScreenState extends State<RecordingScreen>
           }
         },
         builder: (context, state) {
-          final isCalibrating = state is SensorCalibrating;
+          final stabilizingState = state is SensorStabilizing ? state : null;
+          final isStabilizing = stabilizingState != null;
           final recordingState = state is SensorRecording ? state : null;
           final isRecording = recordingState != null;
           final isProcessing = state is SensorProcessing;
           final latest = recordingState?.latest;
-          final calibState = state is SensorCalibrating ? state : null;
-          final elapsedMs = calibState?.elapsedMs
-              ?? recordingState?.elapsedMs ?? 0;
-          final isActive = isCalibrating || isRecording;
+          final elapsedMs = recordingState?.elapsedMs ?? 0;
+          final isActive = isStabilizing || isRecording;
 
           return PopScope(
             canPop: !isActive && !isProcessing,
@@ -96,8 +95,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                 title: Text(
                   isProcessing
                       ? 'Processing...'
-                      : isCalibrating
-                          ? 'Calibrating...'
+                      : isStabilizing
+                          ? 'Get Ready...'
                           : isRecording
                               ? 'Recording...'
                               : 'Ready',
@@ -127,12 +126,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                     Expanded(
                       child: isProcessing
                           ? _ProcessingPanel()
-                          : isCalibrating
-                              ? _CalibrationPanel(
-                                  progress: calibState!.progress,
-                                  samplesCollected: calibState.samplesCollected,
-                                  samplesNeeded: calibState.samplesNeeded,
-                                )
+                          : isStabilizing
+                              ? _StabilizingPanel(remainingSeconds: stabilizingState.remainingSeconds)
                               : isRecording && latest != null
                                   ? _LiveReadingsPanel(reading: latest)
                                   : _IdlePanel(profile: widget.profile),
@@ -261,16 +256,9 @@ class _StopButton extends StatelessWidget {
 }
 
 // 
-class _CalibrationPanel extends StatelessWidget {
-  final double progress;
-  final int samplesCollected;
-  final int samplesNeeded;
-
-  const _CalibrationPanel({
-    required this.progress,
-    required this.samplesCollected,
-    required this.samplesNeeded,
-  });
+class _StabilizingPanel extends StatelessWidget {
+  final int remainingSeconds;
+  const _StabilizingPanel({required this.remainingSeconds});
 
   @override
   Widget build(BuildContext context) {
@@ -283,48 +271,36 @@ class _CalibrationPanel extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
+            Container(
               width: 120,
               height: 120,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  SizedBox(
-                    width: 120,
-                    height: 120,
-                    child: CircularProgressIndicator(
-                      value: progress,
-                      strokeWidth: 8,
-                      backgroundColor: cs.outlineVariant.withOpacity(0.3),
-                      color: cs.primary,
-                    ),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: cs.primary, width: 4),
+                color: cs.primaryContainer.withValues(alpha: 0.3),
+              ),
+              child: Center(
+                child: Text(
+                  '$remainingSeconds',
+                  style: theme.textTheme.displayLarge?.copyWith(
+                    fontWeight: FontWeight.w900,
+                    color: cs.primary,
                   ),
-                  Icon(Icons.phone_android, size: 48,
-                      color: cs.primary.withOpacity(0.8)),
-                ],
+                ),
               ),
             ),
             const SizedBox(height: 24),
             Text(
-              'Calibrating Sensors',
+              'Stabilizing...',
               style: theme.textTheme.headlineSmall
                   ?.copyWith(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 12),
             Text(
-              'Keep the phone steady and still.\n'
-              'Detecting gravity direction...',
+              'Hold the phone steady on your body.\nRecording begins automatically.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: cs.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              '$samplesCollected / $samplesNeeded samples',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: cs.primary,
-                fontWeight: FontWeight.w600,
               ),
             ),
           ],
@@ -363,7 +339,7 @@ class _ProcessingPanel extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              'Applying calibration, coordinate transform,\n'
+              'Detecting gravity, computing forces,\n'
               'integration, and drift correction...',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
@@ -420,9 +396,9 @@ class _IdlePanel extends StatelessWidget {
             ),
             const SizedBox(height: 24),
             Text(
-              'Place phone steady on your body, press START.\n'
-              'Keep still during calibration (~1 sec),\n'
-              'then perform your jump or approach.',
+              'Place phone on your body and press START.\n'
+              'Gravity direction is detected automatically.\n'
+              'Perform your jump or approach.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: cs.onSurfaceVariant,

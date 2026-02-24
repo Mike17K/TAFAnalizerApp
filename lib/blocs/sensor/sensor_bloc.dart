@@ -13,38 +13,37 @@ class _SampleTakenEvent extends SensorEvent {
   _SampleTakenEvent(this.reading);
 }
 
-class SensorBloc extends Bloc<SensorEvent, SensorState> {
-  static const double _lpAlpha = 0.2;      // 0.8*prev + 0.2*new
-  static const double _cfAccelW = 0.02;    // complementary filter: accel trust
-  static const double _cfGyroW  = 0.98;    // complementary filter: gyro trust
-  static const int _calibSamples = 50;     // ~1 second at 50Hz
-  static const double _calibVarianceThresh = 0.15; // m/s² variance threshold
+// Internal event: stabilization countdown tick
+class _StabilizeTickEvent extends SensorEvent {
+  final int remainingSeconds;
+  _StabilizeTickEvent(this.remainingSeconds);
+}
 
-  double _fAx = 0, _fAy = 0, _fAz = 0;
-  double _fGx = 0, _fGy = 0, _fGz = 0;
-  double _pitch = 0, _roll = 0, _yaw = 0;
+class SensorBloc extends Bloc<SensorEvent, SensorState> {
+  static const int _stabilizeSeconds = 3;
+
+  double _rawAx = 0, _rawAy = 0, _rawAz = 0;
+  double _rawGx = 0, _rawGy = 0, _rawGz = 0;
+  double _yaw = 0;
+  bool _hasData = false;
 
   DateTime? _sessionStart;
   DateTime? _lastSampleTime;
   String _athleteName = '';
   double _athleteWeightKg = 70.0;
   final List<SensorReading> _readings = [];
-  bool _isFirst = true;
-  bool _calibrated = false;
-
-  double _rawAx = 0, _rawAy = 0, _rawAz = 0;
-  double _rawGx = 0, _rawGy = 0, _rawGz = 0;
-  bool _hasData = false;
 
   StreamSubscription? _accelSub;
   StreamSubscription? _gyroSub;
   Timer? _timer;
+  Timer? _stabilizeTimer;
 
   SensorBloc() : super(SensorIdle()) {
     on<StartRecordingEvent>(_onStart);
     on<StopRecordingEvent>(_onStop);
     on<ResetSensorEvent>(_onReset);
     on<_SampleTakenEvent>(_onSample);
+    on<_StabilizeTickEvent>(_onStabilizeTick);
   }
 
   void _onStart(StartRecordingEvent event, Emitter<SensorState> emit) async {
@@ -53,130 +52,97 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
     _readings.clear();
     _sessionStart = DateTime.now();
     _lastSampleTime = _sessionStart;
-    _isFirst = true;
-    _calibrated = false;
-    _pitch = _roll = _yaw = 0;
-    _fAx = _fAy = _fAz = _fGx = _fGy = _fGz = 0;
+    _yaw = 0;
     _hasData = false;
 
-    _accelSub = userAccelerometerEventStream(
+    // Start sensors immediately so they warm up during stabilization
+    _accelSub = accelerometerEventStream(
       samplingPeriod: SensorInterval.gameInterval,
-    ).listen((e) { _rawAx = e.x; _rawAy = e.y; _rawAz = e.z; _hasData = true; },
-        onError: (_) {});
+    ).listen((e) {
+      _rawAx = e.x; _rawAy = e.y; _rawAz = e.z; _hasData = true;
+    }, onError: (_) {});
 
     _gyroSub = gyroscopeEventStream(
       samplingPeriod: SensorInterval.gameInterval,
-    ).listen((e) { _rawGx = e.x; _rawGy = e.y; _rawGz = e.z; },
-        onError: (_) {});
+    ).listen((e) {
+      _rawGx = e.x; _rawGy = e.y; _rawGz = e.z;
+    }, onError: (_) {});
 
-    emit(SensorCalibrating(
-      samplesCollected: 0,
-      samplesNeeded: _calibSamples,
-      elapsedMs: 0,
-    ));
+    // Stabilization countdown — 3 seconds before recording starts
+    emit(SensorStabilizing(remainingSeconds: _stabilizeSeconds));
 
-    // 50Hz timer — safe add() call outside emitter
-    _timer = Timer.periodic(const Duration(milliseconds: 20), (_) {
-      if (!_hasData) return;
-      add(_SampleTakenEvent(_computeReading()));
+    int remaining = _stabilizeSeconds;
+    _stabilizeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      remaining--;
+      if (remaining > 0) {
+        add(_StabilizeTickEvent(remaining));
+      } else {
+        _stabilizeTimer?.cancel();
+        _stabilizeTimer = null;
+        _sessionStart = DateTime.now();
+        _lastSampleTime = _sessionStart;
+        // Begin actual 50Hz sampling
+        _timer = Timer.periodic(const Duration(milliseconds: 20), (__) {
+          if (!_hasData) return;
+          add(_SampleTakenEvent(_computeReading()));
+        });
+        add(_StabilizeTickEvent(0)); // signal recording start
+      }
     });
   }
 
-  void _onSample(_SampleTakenEvent event, Emitter<SensorState> emit) {
+  void _onStabilizeTick(_StabilizeTickEvent event, Emitter<SensorState> emit) {
     if (state is SensorIdle || state is SensorComplete || state is SensorError) return;
-    _readings.add(event.reading);
-    final count = _readings.length;
-    final elapsedMs = event.reading.timestampMs;
-
-    // Calibration phase
-    if (!_calibrated) {
-      if (count < _calibSamples) {
-        if (count % 5 == 0) {
-          emit(SensorCalibrating(
-            samplesCollected: count,
-            samplesNeeded: _calibSamples,
-            elapsedMs: elapsedMs,
-          ));
-        }
-        return;
-      }
-      // Check if stationary: compute variance of accel magnitude
-      if (_isStationary(_readings)) {
-        _calibrated = true;
-        emit(SensorRecording(
-          readings: List.from(_readings),
-          latest: event.reading,
-          elapsedMs: elapsedMs,
-          calibrated: true,
-        ));
-      } else {
-        // Keep collecting — slide window
-        emit(SensorCalibrating(
-          samplesCollected: count,
-          samplesNeeded: _calibSamples,
-          elapsedMs: elapsedMs,
-        ));
-      }
-      return;
-    }
-
-    // Recording phase — refresh UI every 5 samples (~10 Hz)
-    if (count % 5 == 0) {
+    if (event.remainingSeconds > 0) {
+      emit(SensorStabilizing(remainingSeconds: event.remainingSeconds));
+    } else {
+      // Countdown done — start recording
       emit(SensorRecording(
-        readings: List.from(_readings),
-        latest: event.reading,
-        elapsedMs: elapsedMs,
-        calibrated: true,
+        readings: const [],
+        latest: null,
+        elapsedMs: 0,
       ));
     }
   }
 
-  bool _isStationary(List<SensorReading> readings) {
-    final last = readings.length < _calibSamples
-        ? readings
-        : readings.sublist(readings.length - _calibSamples);
-    if (last.length < 10) return false;
+  void _onSample(_SampleTakenEvent event, Emitter<SensorState> emit) {
+    if (state is SensorIdle || state is SensorStabilizing || state is SensorComplete || state is SensorError) {
+      return;
+    }
+    _readings.add(event.reading);
+    final count = _readings.length;
 
-    final mags = last.map((r) => r.accelMagnitude).toList();
-    final mean = mags.reduce((a, b) => a + b) / mags.length;
-    final variance = mags.map((m) => (m - mean) * (m - mean)).reduce((a, b) => a + b) / mags.length;
-    return sqrt(variance) < _calibVarianceThresh;
+    // Refresh UI every 5 samples (~10 Hz)
+    if (count % 5 == 0) {
+      emit(SensorRecording(
+        readings: List.from(_readings),
+        latest: event.reading,
+        elapsedMs: event.reading.timestampMs,
+      ));
+    }
   }
 
   SensorReading _computeReading() {
     final now = DateTime.now();
-    final dt = now.difference(_lastSampleTime!).inMicroseconds / 1_000_000.0;
+    final dt = now.difference(_lastSampleTime!).inMicroseconds / 1000000.0;
     _lastSampleTime = now;
     final elapsedMs = now.difference(_sessionStart!).inMilliseconds;
 
-    if (_isFirst) {
-      _fAx = _rawAx; _fAy = _rawAy; _fAz = _rawAz;
-      _fGx = _rawGx; _fGy = _rawGy; _fGz = _rawGz;
-      _pitch = _accelPitch(_rawAx, _rawAy, _rawAz);
-      _roll  = _accelRoll(_rawAy, _rawAz);
-      _isFirst = false;
-    } else {
-      _fAx = (1 - _lpAlpha) * _fAx + _lpAlpha * _rawAx;
-      _fAy = (1 - _lpAlpha) * _fAy + _lpAlpha * _rawAy;
-      _fAz = (1 - _lpAlpha) * _fAz + _lpAlpha * _rawAz;
-      _fGx = (1 - _lpAlpha) * _fGx + _lpAlpha * _rawGx;
-      _fGy = (1 - _lpAlpha) * _fGy + _lpAlpha * _rawGy;
-      _fGz = (1 - _lpAlpha) * _fGz + _lpAlpha * _rawGz;
+    // Integrate yaw from raw gyroscope for live display
+    _yaw += _rawGz * dt * (180 / pi);
+    while (_yaw > 180) { _yaw -= 360; }
+    while (_yaw < -180) { _yaw += 360; }
 
-      final pitchAccel = _accelPitch(_fAx, _fAy, _fAz);
-      final rollAccel  = _accelRoll(_fAy, _fAz);
-      _pitch = _cfGyroW * (_pitch + _fGx * dt * (180 / pi)) + _cfAccelW * pitchAccel;
-      _roll  = _cfGyroW * (_roll  + _fGy * dt * (180 / pi)) + _cfAccelW * rollAccel;
-      _yaw  += _fGz * dt * (180 / pi);
-      while (_yaw >  180) { _yaw -= 360; }
-      while (_yaw < -180) { _yaw += 360; }
-    }
+    // Instant pitch/roll from raw accelerometer (including gravity) for live display
+    final pitch = atan2(-_rawAx, sqrt(_rawAy * _rawAy + _rawAz * _rawAz)) * (180 / pi);
+    final roll = atan2(_rawAy, _rawAz) * (180 / pi);
 
+    // Store raw values — no low-pass or complementary filtering
     return SensorReading(
       timestampMs: elapsedMs,
-      accelX: _fAx, accelY: _fAy, accelZ: _fAz,
-      gyroX: _fGx,  gyroY: _fGy,  gyroZ: _fGz,
-      pitch: _pitch, roll: _roll,  yaw: _yaw,
+      accelX: _rawAx, accelY: _rawAy, accelZ: _rawAz,
+      gyroX: _rawGx, gyroY: _rawGy, gyroZ: _rawGz,
+      pitch: pitch, roll: roll, yaw: _yaw,
     );
   }
 
@@ -187,7 +153,6 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
       return;
     }
     emit(SensorProcessing());
-    // Post-processing is done inside SessionResult.fromReadings (via PostProcessor)
     final result = SessionResult.fromReadings(
       readings: List.from(_readings),
       athleteWeightKg: _athleteWeightKg,
@@ -204,16 +169,11 @@ class SensorBloc extends Bloc<SensorEvent, SensorState> {
   }
 
   Future<void> _stopStreams() async {
+    _stabilizeTimer?.cancel(); _stabilizeTimer = null;
     _timer?.cancel(); _timer = null;
     await _accelSub?.cancel(); _accelSub = null;
     await _gyroSub?.cancel();  _gyroSub  = null;
   }
-
-  double _accelPitch(double ax, double ay, double az) =>
-      atan2(-ax, sqrt(ay * ay + az * az)) * (180 / pi);
-
-  double _accelRoll(double ay, double az) =>
-      atan2(ay, az) * (180 / pi);
 
   @override
   Future<void> close() async {

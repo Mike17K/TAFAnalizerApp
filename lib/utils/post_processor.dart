@@ -4,60 +4,47 @@ import '../models/processed_frame.dart';
 
 /// Post-processes raw sensor readings into world-frame kinematics.
 ///
-/// Algorithm overview:
-/// 1. Detect the initial stationary calibration window (low accel variance).
-/// 2. From the full accelerometer (with gravity) during calibration, compute
-///    the gravity vector in phone coordinates → derive the rotation matrix R
-///    that maps phone-frame → world-frame (Y = up).
-/// 3. For each sample, use a complementary-filter–tracked orientation to
-///    rotate the user-accelerometer (gravity-removed) into world frame.
-/// 4. Integrate world accel → velocity → position, with ZUPT drift correction.
-/// 5. Compute force = mass × |accel_world|.
-/// 6. Correct athlete orientation so the figure stands upright at rest.
+/// Algorithm (no smoothing, no calibration stage):
+/// 1. Detect gravity direction from the mean of ALL accelerometer readings.
+///    Since the person is standing for most of the recording, the mean
+///    converges to the gravity vector in phone coordinates.
+/// 2. Build a rotation matrix R that maps phone-frame → world-frame (Y = up).
+/// 3. For each sample: subtract gravity from raw accel → linear acceleration,
+///    rotate linear accel to world frame.
+/// 4. Integrate world-frame linear accel → velocity (starting at v=0) → position.
+/// 5. Use gyroscope integration for body orientation tracking.
+/// 6. Compute force = mass × |linear_accel_world|.
+/// 7. Mark propulsion frames (vertical velocity increasing AND >= 0).
+/// 8. Apply linear drift correction assuming v ≈ 0 at start and end.
 class PostProcessor {
-  /// Minimum number of samples to consider as calibration window.
-  static const int _minCalibSamples = 25; // ~0.5 s at 50 Hz
-  static const double _calibVarThreshold = 0.15; // m/s² variance threshold
-
   final List<SensorReading> rawReadings;
   final double athleteMassKg;
-
-  /// Raw full-accelerometer readings (with gravity, X/Y/Z).
-  /// These are captured separately because `userAccelerometerEventStream`
-  /// removes gravity. We reconstruct gravity from the gyro-integrated
-  /// orientation instead.
-  final List<List<double>>? rawFullAccel;
 
   PostProcessor({
     required this.rawReadings,
     required this.athleteMassKg,
-    this.rawFullAccel,
   });
 
   /// Main entry point — returns the list of processed frames.
   List<ProcessedFrame> process() {
     if (rawReadings.length < 2) return [];
 
-    // ── Step 1: Find calibration window ────────────────────────
-    final calibEnd = _findCalibrationEnd();
+    // ── Step 1: Compute gravity vector from mean of all readings ──
+    // The full accelerometer (with gravity) reads the reaction to gravity
+    // when stationary. Since the athlete is standing for most of the
+    // recording, the average acceleration ≈ gravity direction in phone frame.
+    final gravity = _computeGravityVector();
 
-    // ── Step 2: Compute initial gravity direction in phone frame ──
-    //   During calibration the phone is stationary, so the user-accel
-    //   should be ~0. The gyro-integrated euler angles tell us the
-    //   phone's orientation relative to when recording started.  But
-    //   we also know that the "real" gravity direction at rest can be
-    //   estimated from the average user-accel residuals + empirical
-    //   gravity on the accel-with-gravity sensor. Since we only have
-    //   the user-accelerometer, we derive the phone orientation from
-    //   the euler angles computed in the sensor bloc.
-    final calibPitch = _avgField(0, calibEnd, (r) => r.pitch);
-    final calibRoll = _avgField(0, calibEnd, (r) => r.roll);
-    final calibYaw = _avgField(0, calibEnd, (r) => r.yaw);
+    // ── Step 2: Build rotation matrix (phone → world, Y = up) ──
+    final rot = _buildRotationMatrix(gravity);
 
-    // ── Step 3: Build rotation matrices & integrate ─────────────
+    // ── Step 3 & 4: Subtract gravity, rotate, integrate ──────────
     final frames = <ProcessedFrame>[];
     double vx = 0, vy = 0, vz = 0;
     double px = 0, py = 0, pz = 0;
+
+    // Gyroscope-integrated orientation for athlete body angles
+    double gyroPitch = 0, gyroRoll = 0, gyroYaw = 0;
 
     for (int i = 0; i < rawReadings.length; i++) {
       final r = rawReadings[i];
@@ -65,19 +52,17 @@ class PostProcessor {
           ? 0.0
           : (r.timestampMs - rawReadings[i - 1].timestampMs) / 1000.0;
 
-      // Rotation: current euler minus calibration baseline
-      final dPitchDeg = r.pitch - calibPitch;
-      final dRollDeg = r.roll - calibRoll;
-      final dYawDeg = r.yaw - calibYaw;
+      // Linear acceleration in phone frame = raw accel − gravity
+      final linAx = r.accelX - gravity[0];
+      final linAy = r.accelY - gravity[1];
+      final linAz = r.accelZ - gravity[2];
 
-      // Convert phone-frame user-accel to world-frame
-      final world = _rotateToWorld(
-          r.accelX, r.accelY, r.accelZ, r.pitch, r.roll, r.yaw);
-      final awx = world[0];
-      final awy = world[1];
-      final awz = world[2];
+      // Rotate linear accel to world frame (Y = up)
+      final awx = rot[0][0] * linAx + rot[0][1] * linAy + rot[0][2] * linAz;
+      final awy = rot[1][0] * linAx + rot[1][1] * linAy + rot[1][2] * linAz;
+      final awz = rot[2][0] * linAx + rot[2][1] * linAy + rot[2][2] * linAz;
 
-      // Integrate velocity
+      // Integrate velocity (starts at 0)
       vx += awx * dt;
       vy += awy * dt;
       vz += awz * dt;
@@ -87,7 +72,27 @@ class PostProcessor {
       py += vy * dt;
       pz += vz * dt;
 
-      final accelMag = sqrt(awx * awx + awy * awy + awz * awz);
+      // ── Step 5: Gyro-integrated body orientation (relative to start) ──
+      // Raw gyroscope gives angular velocity in phone frame (rad/s).
+      // We also rotate gyro into world frame for meaningful body angles.
+      if (i > 0) {
+        // Rotate gyro vector to world frame for proper pitch/roll/yaw
+        final gwx = rot[0][0] * r.gyroX + rot[0][1] * r.gyroY + rot[0][2] * r.gyroZ;
+        final gwy = rot[1][0] * r.gyroX + rot[1][1] * r.gyroY + rot[1][2] * r.gyroZ;
+        final gwz = rot[2][0] * r.gyroX + rot[2][1] * r.gyroY + rot[2][2] * r.gyroZ;
+
+        // Integrate: world-frame pitch (X rot), roll (Z rot), yaw (Y rot)
+        gyroPitch += gwx * dt * (180 / pi);
+        gyroRoll  += gwz * dt * (180 / pi);
+        gyroYaw   += gwy * dt * (180 / pi);
+      }
+
+      // Normalise yaw to [-180, 180]
+      while (gyroYaw > 180) { gyroYaw -= 360; }
+      while (gyroYaw < -180) { gyroYaw += 360; }
+
+      // ── Step 6: Force from linear acceleration ──
+      final accelMag = _mag3(awx, awy, awz);
       final forceN = athleteMassKg * accelMag;
 
       frames.add(ProcessedFrame(
@@ -103,14 +108,18 @@ class PostProcessor {
         posZ: pz,
         forceN: forceN,
         forceKg: forceN / 9.81,
-        athletePitch: dPitchDeg,
-        athleteRoll: dRollDeg,
-        athleteYaw: dYawDeg,
+        athletePitch: gyroPitch,
+        athleteRoll: gyroRoll,
+        athleteYaw: gyroYaw,
+        isPropulsion: false, // set in step 7
       ));
     }
 
-    // ── Step 4: ZUPT drift correction ───────────────────────────
-    _applyDriftCorrection(frames, calibEnd);
+    // ── Step 8: Linear drift correction ──────────────────────────
+    _applyDriftCorrection(frames);
+
+    // ── Step 7: Mark propulsion frames ───────────────────────────
+    _markPropulsionFrames(frames);
 
     return frames;
   }
@@ -119,112 +128,88 @@ class PostProcessor {
   // Private helpers
   // ═══════════════════════════════════════════════════════════════
 
-  /// Detect where the calibration (stationary) phase ends.
-  /// We look for the first window of _minCalibSamples where the
-  /// accel-magnitude variance exceeds the threshold.
-  int _findCalibrationEnd() {
-    if (rawReadings.length <= _minCalibSamples) {
-      return rawReadings.length ~/ 2;
+  /// Compute gravity vector from the mean of all raw accelerometer readings.
+  /// When the athlete is standing (most of the recording), the accelerometer
+  /// reads the gravitational reaction force pointing upward in phone coords.
+  List<double> _computeGravityVector() {
+    double sx = 0, sy = 0, sz = 0;
+    for (final r in rawReadings) {
+      sx += r.accelX;
+      sy += r.accelY;
+      sz += r.accelZ;
     }
-
-    // Compute running variance of accel magnitude
-    for (int end = _minCalibSamples; end < rawReadings.length; end++) {
-      // Check variance of last _minCalibSamples
-      double sumM = 0, sumM2 = 0;
-      for (int j = end - _minCalibSamples; j < end; j++) {
-        final m = rawReadings[j].accelMagnitude;
-        sumM += m;
-        sumM2 += m * m;
-      }
-      final mean = sumM / _minCalibSamples;
-      final variance = sumM2 / _minCalibSamples - mean * mean;
-
-      if (variance > _calibVarThreshold) {
-        // Movement started somewhere in this window
-        return max(_minCalibSamples, end - _minCalibSamples);
-      }
-    }
-
-    // If never exceeded, assume the first half is calibration
-    return rawReadings.length ~/ 2;
+    final n = rawReadings.length.toDouble();
+    return [sx / n, sy / n, sz / n];
   }
 
-  double _avgField(int start, int end, double Function(SensorReading) fn) {
-    if (end <= start) return 0;
-    double sum = 0;
-    for (int i = start; i < end; i++) {
-      sum += fn(rawReadings[i]);
+  /// Build rotation matrix from phone frame to world frame (Y = up).
+  ///
+  /// The gravity vector in phone frame points "up" (reaction to gravity).
+  /// We use it to define the world Y axis, then pick orthogonal X and Z.
+  List<List<double>> _buildRotationMatrix(List<double> gravity) {
+    final gMag = _mag3(gravity[0], gravity[1], gravity[2]);
+    if (gMag < 0.01) {
+      // Fallback: identity matrix (should not happen with real data)
+      return [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+      ];
     }
-    return sum / (end - start);
-  }
 
-  /// Rotate a phone-frame acceleration vector to world frame
-  /// using the phone's current euler angles.
-  ///
-  /// Convention: pitch = rotation about X, roll = rotation about Z,
-  /// yaw = rotation about Y.  World Y = up.
-  ///
-  /// The rotation matrix is R = Ry(yaw) * Rx(pitch) * Rz(roll).
-  List<double> _rotateToWorld(
-      double ax, double ay, double az,
-      double pitchDeg, double rollDeg, double yawDeg) {
-    final p = pitchDeg * (pi / 180);
-    final r = rollDeg * (pi / 180);
-    final y = yawDeg * (pi / 180);
+    // Up direction in phone frame (normalised gravity)
+    final ux = gravity[0] / gMag;
+    final uy = gravity[1] / gMag;
+    final uz = gravity[2] / gMag;
 
-    final cp = cos(p), sp = sin(p);
-    final cr = cos(r), sr = sin(r);
-    final cy = cos(y), sy = sin(y);
+    // Choose a reference vector not parallel to up
+    double refX, refY, refZ;
+    if (ux.abs() < 0.9) {
+      refX = 1; refY = 0; refZ = 0;
+    } else {
+      refX = 0; refY = 0; refZ = 1;
+    }
 
-    // R = Ry * Rx * Rz
-    // Row 0
-    final r00 = cy * cr + sy * sp * sr;
-    final r01 = -cy * sr + sy * sp * cr;
-    final r02 = sy * cp;
-    // Row 1
-    final r10 = cp * sr;
-    final r11 = cp * cr;
-    final r12 = -sp;
-    // Row 2
-    final r20 = -sy * cr + cy * sp * sr;
-    final r21 = sy * sr + cy * sp * cr;
-    final r22 = cy * cp;
+    // Right = cross(up, ref), normalised → world X axis in phone coords
+    double rx = uy * refZ - uz * refY;
+    double ry = uz * refX - ux * refZ;
+    double rz = ux * refY - uy * refX;
+    final rMag = _mag3(rx, ry, rz);
+    rx /= rMag; ry /= rMag; rz /= rMag;
 
+    // Forward = cross(right, up) → world Z axis in phone coords
+    final fx = ry * uz - rz * uy;
+    final fy = rz * ux - rx * uz;
+    final fz = rx * uy - ry * ux;
+
+    // Rotation matrix: rows are world axes expressed in phone coordinates
+    // v_world = R * v_phone
     return [
-      r00 * ax + r01 * ay + r02 * az,
-      r10 * ax + r11 * ay + r12 * az,
-      r20 * ax + r21 * ay + r22 * az,
+      [rx, ry, rz], // world X (right)
+      [ux, uy, uz], // world Y (up)
+      [fx, fy, fz], // world Z (forward)
     ];
   }
 
-  /// Apply Zero-Velocity Update (ZUPT) drift correction.
-  ///
-  /// At the start (calibration window) velocity should be zero.
-  /// We also check if the end is stationary.  Then we linearly
-  /// subtract the residual drift from velocity and re-integrate
-  /// position.
-  void _applyDriftCorrection(List<ProcessedFrame> frames, int calibEnd) {
+  /// Linear drift correction: assume velocity ≈ 0 at start and end.
+  /// Subtracts a linearly increasing velocity bias, then re-integrates
+  /// position from the corrected velocity.
+  void _applyDriftCorrection(List<ProcessedFrame> frames) {
     if (frames.length < 2) return;
 
-    // Compute drift rate: difference between expected (0) and actual
-    // velocity at calibEnd, and end-of-session residual.
-    final calFrame = calibEnd < frames.length ? frames[calibEnd] : frames.last;
     final endFrame = frames.last;
+    final totalTime = endFrame.timeSec;
+    if (totalTime <= 0) return;
 
-    // Drift per second (linear ramp from calibEnd velocity to end velocity)
-    final dtTotal = endFrame.timeSec - calFrame.timeSec;
-    if (dtTotal <= 0) return;
+    // Drift rate = residual velocity / total time
+    final driftRateX = endFrame.velX / totalTime;
+    final driftRateY = endFrame.velY / totalTime;
+    final driftRateZ = endFrame.velZ / totalTime;
 
-    final driftRateX = endFrame.velX / endFrame.timeSec;
-    final driftRateY = endFrame.velY / endFrame.timeSec;
-    final driftRateZ = endFrame.velZ / endFrame.timeSec;
-
-    // Subtract linearly-increasing drift, then re-integrate position
+    // Subtract linear drift and re-integrate position
     double px = 0, py = 0, pz = 0;
-
     for (int i = 0; i < frames.length; i++) {
       final f = frames[i];
-      // Corrected velocity
       final cvx = f.velX - driftRateX * f.timeSec;
       final cvy = f.velY - driftRateY * f.timeSec;
       final cvz = f.velZ - driftRateZ * f.timeSec;
@@ -250,7 +235,52 @@ class PostProcessor {
         athletePitch: f.athletePitch,
         athleteRoll: f.athleteRoll,
         athleteYaw: f.athleteYaw,
+        isPropulsion: f.isPropulsion,
       );
     }
+  }
+
+  /// Mark frames where the athlete is actively generating propulsive force.
+  ///
+  /// Propulsion = vertical velocity is increasing (d(vy)/dt > 0) AND vy >= 0.
+  /// This excludes:
+  /// - Free-fall / airborne phases (vy decreasing or negative)
+  /// - Landing impact (vy negative, even if becoming less negative)
+  /// Only propulsion-phase force is used for peak force calculations.
+  void _markPropulsionFrames(List<ProcessedFrame> frames) {
+    if (frames.length < 2) return;
+
+    for (int i = 1; i < frames.length; i++) {
+      final prevVy = frames[i - 1].velY;
+      final curVy = frames[i].velY;
+      // Propulsion: vertical velocity is going up AND is non-negative
+      final isProp = curVy > prevVy && curVy >= 0;
+
+      if (isProp != frames[i].isPropulsion) {
+        frames[i] = ProcessedFrame(
+          timeSec: frames[i].timeSec,
+          accelXw: frames[i].accelXw,
+          accelYw: frames[i].accelYw,
+          accelZw: frames[i].accelZw,
+          velX: frames[i].velX,
+          velY: frames[i].velY,
+          velZ: frames[i].velZ,
+          posX: frames[i].posX,
+          posY: frames[i].posY,
+          posZ: frames[i].posZ,
+          forceN: frames[i].forceN,
+          forceKg: frames[i].forceKg,
+          athletePitch: frames[i].athletePitch,
+          athleteRoll: frames[i].athleteRoll,
+          athleteYaw: frames[i].athleteYaw,
+          isPropulsion: isProp,
+        );
+      }
+    }
+  }
+
+  double _mag3(double x, double y, double z) {
+    final sq = x * x + y * y + z * z;
+    return sq <= 0 || sq.isNaN ? 0.0 : sqrt(sq);
   }
 }
